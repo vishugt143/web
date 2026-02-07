@@ -1,12 +1,11 @@
 import asyncio
 import requests
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from configs import BOT_TOKEN, OWNERS, PING_INTERVAL, REPORT_INTERVAL
+
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
 
 status_cache = {}
 
@@ -18,39 +17,35 @@ def load_urls():
 
 def ping(url):
     try:
-        r = requests.get(
-            url,
-            timeout=10,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         return r.status_code < 500
     except:
         return False
 
 
-async def notify(app, text):
-    for owner in OWNERS:
+async def notify(text):
+    for o in OWNERS:
         try:
-            await app.bot.send_message(owner, text)
+            await bot.send_message(o, text)
         except:
             pass
 
 
-async def monitor(app):
+async def monitor():
     while True:
         for url in load_urls():
-            current = ping(url)
-            previous = status_cache.get(url)
+            cur = ping(url)
+            prev = status_cache.get(url)
 
-            if previous is True and current is False:
-                await notify(app, f"🚨 WEBSITE DOWN\n❌ {url}")
+            if prev is True and cur is False:
+                await notify(f"🚨 WEBSITE DOWN\n❌ {url}")
 
-            status_cache[url] = current
+            status_cache[url] = cur
 
         await asyncio.sleep(PING_INTERVAL)
 
 
-async def report(app):
+async def report():
     while True:
         await asyncio.sleep(REPORT_INTERVAL)
 
@@ -58,27 +53,33 @@ async def report(app):
         inactive = [u for u, s in status_cache.items() if not s]
 
         msg = (
-            f"📊 6 HOUR STATUS REPORT\n\n"
+            f"📊 6 HOUR REPORT\n\n"
             f"✅ Active: {len(active)}\n"
             f"❌ Non-Active: {len(inactive)}"
         )
 
         if inactive:
-            msg += "\n\n❌ OFFLINE SITES:\n" + "\n".join(inactive)
+            msg += "\n\n❌ OFFLINE:\n" + "\n".join(inactive)
 
-        await notify(app, msg)
+        await notify(msg)
 
 
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in OWNERS:
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    await message.answer("✅ Bot is running")
+
+
+@dp.message(Command("status"))
+async def status_cmd(message: types.Message):
+    if message.from_user.id not in OWNERS:
         return
 
     active, inactive = [], []
 
-    for url in load_urls():
-        ok = ping(url)
-        status_cache[url] = ok
-        (active if ok else inactive).append(url)
+    for u in load_urls():
+        ok = ping(u)
+        status_cache[u] = ok
+        (active if ok else inactive).append(u)
 
     msg = (
         f"📡 CURRENT STATUS\n\n"
@@ -89,27 +90,13 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if inactive:
         msg += "\n\n❌ OFFLINE:\n" + "\n".join(inactive)
 
-    await update.message.reply_text(msg)
-
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Monitoring bot is running.")
+    await message.answer(msg)
 
 
 async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-
-    asyncio.create_task(monitor(app))
-    asyncio.create_task(report(app))
-
-    await app.initialize()
-    await app.start()
-    await app.bot.initialize()
-
-    await asyncio.Event().wait()  # keep alive
+    asyncio.create_task(monitor())
+    asyncio.create_task(report())
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
