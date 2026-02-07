@@ -1,0 +1,117 @@
+import asyncio
+import requests
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes
+)
+from configs import BOT_TOKEN, OWNERS, PING_INTERVAL, REPORT_INTERVAL
+
+status_cache = {}  # url: True/False
+
+
+def load_urls():
+    with open("url.txt", "r") as f:
+        return [i.strip() for i in f if i.strip()]
+
+
+async def send_to_owners(app, text):
+    for owner in OWNERS:
+        try:
+            await app.bot.send_message(owner, text)
+        except:
+            pass
+
+
+def check_site(url):
+    try:
+        r = requests.get(url, timeout=10)
+        return r.status_code == 200
+    except:
+        return False
+
+
+async def monitor_sites(app):
+    while True:
+        urls = load_urls()
+        for url in urls:
+            is_up = check_site(url)
+
+            if url not in status_cache:
+                status_cache[url] = is_up
+                continue
+
+            # Instant OFF alert
+            if status_cache[url] and not is_up:
+                await send_to_owners(
+                    app,
+                    f"🚨 WEBSITE DOWN ALERT\n\n❌ {url}\n\nStatus: OFFLINE"
+                )
+
+            status_cache[url] = is_up
+
+        await asyncio.sleep(PING_INTERVAL)
+
+
+async def six_hour_report(app):
+    while True:
+        await asyncio.sleep(REPORT_INTERVAL)
+
+        active, inactive = [], []
+        for url, state in status_cache.items():
+            (active if state else inactive).append(url)
+
+        report = (
+            f"📊 6 HOUR STATUS REPORT\n\n"
+            f"✅ Active: {len(active)}\n"
+            f"❌ Non-Active: {len(inactive)}\n\n"
+        )
+
+        if inactive:
+            report += "❌ OFFLINE LINKS:\n"
+            for u in inactive:
+                report += f"- {u}\n"
+
+        await send_to_owners(app, report)
+
+
+# ---------- /status command ----------
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in OWNERS:
+        return
+
+    active, inactive = [], []
+    for url, state in status_cache.items():
+        (active if state else inactive).append(url)
+
+    text = (
+        f"📡 CURRENT STATUS\n\n"
+        f"✅ Active: {len(active)}\n"
+        f"❌ Non-Active: {len(inactive)}\n\n"
+    )
+
+    if inactive:
+        text += "❌ OFFLINE LINKS:\n"
+        for u in inactive:
+            text += f"- {u}\n"
+
+    await update.message.reply_text(text)
+
+
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("status", status_cmd))
+
+    asyncio.create_task(monitor_sites(app))
+    asyncio.create_task(six_hour_report(app))
+
+    await app.initialize()
+    await app.start()
+    await asyncio.Event().wait()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

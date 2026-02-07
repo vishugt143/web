@@ -1,0 +1,10 @@
+BOT_TOKEN = "8584944563:AAF9FUIrInAeRPHYtDH7qCZaPxZBo_9w_w8"
+
+# Multiple owners allowed
+OWNERS = [
+    5656436152,
+    7554081592
+]
+
+PING_INTERVAL = 150        # 2.5 minutes
+REPORT_INTERVAL = 21600    # 6 hour
