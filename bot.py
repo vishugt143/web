@@ -1,94 +1,65 @@
 import asyncio
+import time
+import traceback
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from configs import BOT_TOKEN, OWNERS, PING_INTERVAL, REPORT_INTERVAL
 
-status_cache = {}
-
-
-def load_urls():
-    with open("url.txt") as f:
-        return [i.strip() for i in f if i.strip()]
-
-
-def ping(url):
+# blocking ping, returns (bool up, int latency_ms or None)
+def ping_blocking(url):
     try:
-        r = requests.get(url, timeout=10)
-        return r.status_code < 500
-    except:
-        return False
-
-
-async def send(app, text):
-    for o in OWNERS:
-        try:
-            await app.bot.send_message(o, text)
-        except:
-            pass
-
-
-async def monitor(app):
-    while True:
-        for url in load_urls():
-            cur = ping(url)
-            prev = status_cache.get(url)
-
-            if prev is True and cur is False:
-                await send(app, f"🚨 WEBSITE DOWN\n❌ {url}")
-
-            status_cache[url] = cur
-
-        await asyncio.sleep(PING_INTERVAL)
-
-
-async def report(app):
-    while True:
-        await asyncio.sleep(REPORT_INTERVAL)
-
-        active = [u for u, s in status_cache.items() if s]
-        inactive = [u for u, s in status_cache.items() if not s]
-
-        msg = (
-            f"📊 6 HOUR REPORT\n\n"
-            f"✅ Active: {len(active)}\n"
-            f"❌ Non-Active: {len(inactive)}\n"
-        )
-
-        if inactive:
-            msg += "\n❌ OFFLINE:\n" + "\n".join(inactive)
-
-        await send(app, msg)
+        t0 = time.time()
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        latency = int((time.time() - t0) * 1000)
+        return (r.status_code < 500, latency)
+    except Exception as e:
+        return (False, None)
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in OWNERS:
+    user_id = update.effective_user.id
+
+    # owner check
+    if user_id not in OWNERS:
         return
 
-    active, inactive = [], []
-    for u in load_urls():
-        ok = ping(u)
-        status_cache[u] = ok
-        (active if ok else inactive).append(u)
+    try:
+        urls = load_urls()
+        if not urls:
+            await update.message.reply_text("⚠️ url.txt खाली है.")
+            return
 
-    msg = (
-        f"📡 CURRENT STATUS\n\n"
-        f"✅ Active: {len(active)}\n"
-        f"❌ Non-Active: {len(inactive)}\n"
-    )
+        # Logging for debug (check Render logs)
+        print(f"[STATUS] requested by {user_id} — checking {len(urls)} urls")
 
-    if inactive:
-        msg += "\n❌ OFFLINE:\n" + "\n".join(inactive)
+        # run ping_blocking concurrently in threadpool
+        tasks = [asyncio.to_thread(ping_blocking, u) for u in urls]
+        results = await asyncio.gather(*tasks)
 
-    await update.message.reply_text(msg)
+        active, inactive = [], []
+        lines = []
+        for u, (ok, latency) in zip(urls, results):
+            status_cache[u] = ok  # update global cache
+            if ok:
+                active.append(u)
+                lines.append(f"✅ {u} — {latency if latency is not None else 'n/a'} ms")
+            else:
+                inactive.append(u)
+                lines.append(f"❌ {u} — DOWN")
 
+        # build message
+        text = (
+            f"📡 CURRENT STATUS (Live)\n\n"
+            f"✅ Active: {len(active)}\n"
+            f"❌ Non-Active: {len(inactive)}\n\n"
+        )
+        text += "\n".join(lines)
 
-async def start_bot():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("status", status_cmd))
+        await update.message.reply_text(text)
 
-    asyncio.create_task(monitor(app))
-    asyncio.create_task(report(app))
-
-    await app.initialize()
-    await app.start()
+    except Exception as exc:
+        # log and notify owner about the exception
+        tb = traceback.format_exc()
+        print("[STATUS] exception:\n", tb)
+        try:
+            await update.message.reply_text("🚨 Error while running /status. Check logs.")
+        except:
+            pass
