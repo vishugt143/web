@@ -1,65 +1,116 @@
 import asyncio
-import time
-import traceback
 import requests
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
+from configs import BOT_TOKEN, OWNERS, PING_INTERVAL, REPORT_INTERVAL
 
-# blocking ping, returns (bool up, int latency_ms or None)
-def ping_blocking(url):
+status_cache = {}
+
+
+def load_urls():
+    with open("url.txt") as f:
+        return [i.strip() for i in f if i.strip()]
+
+
+def ping(url):
     try:
-        t0 = time.time()
-        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        latency = int((time.time() - t0) * 1000)
-        return (r.status_code < 500, latency)
-    except Exception as e:
-        return (False, None)
+        r = requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        return r.status_code < 500
+    except:
+        return False
+
+
+async def notify(app, text):
+    for owner in OWNERS:
+        try:
+            await app.bot.send_message(owner, text)
+        except:
+            pass
+
+
+async def monitor(app):
+    while True:
+        for url in load_urls():
+            current = ping(url)
+            previous = status_cache.get(url)
+
+            if previous is True and current is False:
+                await notify(app, f"🚨 WEBSITE DOWN\n❌ {url}")
+
+            status_cache[url] = current
+
+        await asyncio.sleep(PING_INTERVAL)
+
+
+async def report(app):
+    while True:
+        await asyncio.sleep(REPORT_INTERVAL)
+
+        active = [u for u, s in status_cache.items() if s]
+        inactive = [u for u, s in status_cache.items() if not s]
+
+        msg = (
+            f"📊 6 HOUR STATUS REPORT\n\n"
+            f"✅ Active: {len(active)}\n"
+            f"❌ Non-Active: {len(inactive)}"
+        )
+
+        if inactive:
+            msg += "\n\n❌ OFFLINE SITES:\n" + "\n".join(inactive)
+
+        await notify(app, msg)
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    # owner check
-    if user_id not in OWNERS:
+    if update.effective_user.id not in OWNERS:
         return
 
-    try:
-        urls = load_urls()
-        if not urls:
-            await update.message.reply_text("⚠️ url.txt खाली है.")
-            return
+    active, inactive = [], []
 
-        # Logging for debug (check Render logs)
-        print(f"[STATUS] requested by {user_id} — checking {len(urls)} urls")
+    for url in load_urls():
+        ok = ping(url)
+        status_cache[url] = ok
+        (active if ok else inactive).append(url)
 
-        # run ping_blocking concurrently in threadpool
-        tasks = [asyncio.to_thread(ping_blocking, u) for u in urls]
-        results = await asyncio.gather(*tasks)
+    msg = (
+        f"📡 CURRENT STATUS\n\n"
+        f"✅ Active: {len(active)}\n"
+        f"❌ Non-Active: {len(inactive)}"
+    )
 
-        active, inactive = [], []
-        lines = []
-        for u, (ok, latency) in zip(urls, results):
-            status_cache[u] = ok  # update global cache
-            if ok:
-                active.append(u)
-                lines.append(f"✅ {u} — {latency if latency is not None else 'n/a'} ms")
-            else:
-                inactive.append(u)
-                lines.append(f"❌ {u} — DOWN")
+    if inactive:
+        msg += "\n\n❌ OFFLINE:\n" + "\n".join(inactive)
 
-        # build message
-        text = (
-            f"📡 CURRENT STATUS (Live)\n\n"
-            f"✅ Active: {len(active)}\n"
-            f"❌ Non-Active: {len(inactive)}\n\n"
-        )
-        text += "\n".join(lines)
+    await update.message.reply_text(msg)
 
-        await update.message.reply_text(text)
 
-    except Exception as exc:
-        # log and notify owner about the exception
-        tb = traceback.format_exc()
-        print("[STATUS] exception:\n", tb)
-        try:
-            await update.message.reply_text("🚨 Error while running /status. Check logs.")
-        except:
-            pass
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Monitoring bot is running.")
+
+
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+
+    asyncio.create_task(monitor(app))
+    asyncio.create_task(report(app))
+
+    await app.initialize()
+    await app.start()
+    await app.bot.initialize()
+
+    await asyncio.Event().wait()  # keep alive
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
